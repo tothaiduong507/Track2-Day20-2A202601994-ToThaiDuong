@@ -76,6 +76,39 @@ def detect_cpu() -> dict:
                 info["cores_physical"] = int(data.get("NumberOfCores") or 0) or None
             except (ValueError, KeyError):
                 pass
+        if not info.get("model"):
+            try:
+                import winreg
+
+                key_path = r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
+                    info["model"] = str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
+            except (OSError, ImportError):
+                pass
+        if not info.get("cores_physical"):
+            try:
+                import ctypes
+                import struct
+
+                required = ctypes.c_ulong(0)
+                kernel32 = ctypes.windll.kernel32
+                kernel32.GetLogicalProcessorInformationEx(0, None, ctypes.byref(required))
+                buffer = ctypes.create_string_buffer(required.value)
+                if kernel32.GetLogicalProcessorInformationEx(
+                    0, buffer, ctypes.byref(required)
+                ):
+                    offset = 0
+                    cores = 0
+                    while offset < required.value:
+                        relationship, size = struct.unpack_from("<II", buffer.raw, offset)
+                        if relationship == 0:  # RelationProcessorCore
+                            cores += 1
+                        if size <= 0:
+                            break
+                        offset += size
+                    info["cores_physical"] = cores or None
+            except (AttributeError, OSError, struct.error):
+                pass
     info.setdefault("model", "unknown")
     if not info.get("cores_physical"):
         info["cores_physical"] = info["cores_logical"]
@@ -100,9 +133,31 @@ def detect_ram_gb() -> float:
              "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"],
             timeout=20,
         )
-        digits = "".join(c for c in out if c.isdigit())
-        if digits:
+        digits = out.strip()
+        if rc == 0 and digits.isdigit():
             return round(int(digits) / 1024**3, 1)
+        try:
+            import ctypes
+
+            class MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return round(status.ullTotalPhys / 1024**3, 1)
+        except (AttributeError, OSError):
+            pass
     return 0.0
 
 
